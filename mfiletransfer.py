@@ -13,36 +13,27 @@ class ThreadedRequestHandler(socketserver.BaseRequestHandler):
   def setup(self):
     self.client_address = self.client_address[0].strip()
     self.client_port = self.client_address[1]
-    self.setup_handler(self.client_address, self.client_port)
+    self.command_handler = CommandHandler()
     print("Client from %s:%s" % (self.client_address, self.client_port))
 
+    self.setup_handler(self.client_address, self.client_port)
+
   def setup_handler(self, address, port):
-    pass
+    self.command_handler.register(address, port)
 
   def handle(self):
     while True:
-      data = str(self.request.recv(1024))
+      data = self.request.recv(1024)
       if len(data):
         print("receve %d data" % len(data))
         self.data_handler(data);
       time.sleep(0.1)
   
   def data_handler(self, data):
-    pass
+    self.command_handler.parse_client_request(data);
   
   def finish(self):
-    print("%s:%d disconnect!"%(self.client_address, self.client_port))
-
-class CommandRequestHandler(ThreadedRequestHandler):
-  def __init__(self):
-    ThreadedRequestHandler.__init__(self)
-    self.command_handler = CommandHandler.instance()
-  
-  def setup_handler(self, address, port):
-    self.command_handler.register(address, port)
-  
-  def data_handler(self, data):
-    self.command_handler.parse_client_request(data);
+    print("%s:%s disconnect!"%(self.client_address, self.client_port))
 
 class CommandClient:
   def __init__(self, command_handler):
@@ -83,14 +74,11 @@ class CommandClient:
   def block_request(self, block_index):
     packet = self.command_handler.block_request(block_index)
 
-class CommandTypeEnum(Enum):
-  BlockAcknowledge = 0,
-  Retransmission = 1
-
-
 # Singletone class
 class CommandHandler(object):
   _instance_lock = threading.Lock()
+  BlockAcknowledge = 0
+  Retransmission = 1
 
   def __init__(self):
     self.address_group = []
@@ -116,15 +104,17 @@ class CommandHandler(object):
     return json.dumps(jresp)
   
   def parse_client_request(self, data):
-    jresp = json.load(data)
+    print("parse_client_request: "+str(data))
+    jresp = json.loads(str(data))
     print(jresp)
     return jresp
 
   def retransmission_request(self, packet_list):
     list_str = ",".join(str(id) for id in packet_list)
-    jresp = [{'type': str(CommandTypeEnum.BlockAcknowledge),
-              'slice_list': list_str}]
-    return json.dumps(jresp)
+    jresp = {'type': CommandHandler.Retransmission,
+              'slice_list': list_str}
+    print(jresp)
+    return bytes(json.dumps(jresp).encode('utf-8'))
 
 if __name__ == "__main__":
   arg_parser = argparse.ArgumentParser(description="manual to this script")
