@@ -247,8 +247,8 @@ class MulticastBroker:
   
   def send(self, data):
     # for test, random throw packet
-    if random.randint(0,99) < 20:
-      return
+    #if random.randint(0,99) < 20:
+    #  return
 
     if len(data) > MAX_UDP_PACKET_SIZE:
       logging.warning("Data send by multicast should less than %d, now is %d" %(MAX_UDP_PACKET_SIZE, len(data)))
