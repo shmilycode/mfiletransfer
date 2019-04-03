@@ -32,6 +32,7 @@ class MFileTransferServer:
     self.descriptors = [self.server_socket,]
     self.retransmission_set = set()
     self.response_client_list = set()
+    self.client_buffer = {}
   
   def server_address(self):
     return self.server_socket.getsockname()
@@ -46,7 +47,9 @@ class MFileTransferServer:
           try:
             data = client.recv(MAX_TCP_PACKET_SIZE)
             if len(data):
-              self.request_handler(client, data)
+              # push into client_buffer
+              self.client_buffer[client] += data
+              self.request_handler(client)
             else:
               logging.info("%s:%s client disconnected!" % client.getpeername())
               client.close()
@@ -55,18 +58,26 @@ class MFileTransferServer:
             logging.error(err)
             client.close()
             self.descriptors.remove(client)
+            del self.client_buffer[client]
 
-  def request_handler(self, client, data):
-    request = self.command_handler.parse_client_request(data)
+  def request_handler(self, client):
+    request = self.command_handler.parse_client_request(self.client_buffer[client])
+    # failed to decode, fill to buffer
+    if not request:
+      return
+
     if request['type'] == CommandHandler.RetransmissionRequest:
       if 'slice_list' in request:
         slice_list = [int(slice) for slice in request['slice_list'].split(',')]
         self.retransmission_set.update({item for item in slice_list})
+
+    self.client_buffer[client] = b''
     self.response_client_list.add(client)
 
   def accept_new_connection(self):
     new_client, (remote_host, remote_port) = self.server_socket.accept()
     self.descriptors.append(new_client)
+    self.client_buffer[new_client] = b''
     logging.info("%s:%s client connected!" % new_client.getpeername())
   
   def broadcast(self, data, ignore_clients=[]):
@@ -172,7 +183,7 @@ class CommandHandler(object):
     logging.debug(data)
     jresp = json.loads(data)
     return jresp
-  
+
   def build_transfer_start_request(self, name, size, block_size, slice_size):
     jresp = {"type": CommandHandler.TransferStartNotify, "name": name, "size": size, 
              "block_size": block_size, "slice_size": slice_size}
@@ -199,25 +210,19 @@ class CommandHandler(object):
     return bytes(json.dumps(jresp).encode('utf-8'))
 
   def parse_client_request(self, data):
-    logging.debug(data)
-    jresp = json.loads(data.decode('utf-8'))
-    return jresp
+    try:
+      jresp = json.loads(data.decode('utf-8'))
+      return jresp
+    except ValueError as err:
+      logging.debug("Can' parse data, please wait.")
+      return None
 
 class MulticastBroker:
-  def __init__(self, multicast_address, server_ip, server):
+  def __init__(self, multicast_address):
     self.multicast_host, self.multicast_port = multicast_address
     self.multicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     self.multicast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-    if server:
-        logging.warning("multicast server")
-        self.multicast_socket.bind((server_ip,self.multicast_port))
-        self.multicast_socket.connect(multicast_address)
-
-    else:
-        logging.warning("multicast client")
-        self.multicast_socket.bind(multicast_address)
-        self.multicast_socket.connect((server_ip,self.multicast_port))
+    self.multicast_socket.bind(multicast_address)
 
     group = socket.inet_aton(self.multicast_host)
     mreq = struct.pack('4sL', group, socket.INADDR_ANY)
@@ -242,8 +247,8 @@ class MulticastBroker:
   
   def send(self, data):
     # for test, random throw packet
-    #if random.randint(0,99) < 20:
-    #  return
+    if random.randint(0,99) < 20:
+      return
 
     if len(data) > MAX_UDP_PACKET_SIZE:
       logging.warning("Data send by multicast should less than %d, now is %d" %(MAX_UDP_PACKET_SIZE, len(data)))
@@ -394,28 +399,7 @@ def input_handler(input, server, transfer):
   file_path = input
   return transfer.file_transfer(server, file_path)
 
-if __name__ == "__main__":
-
-  arg_parser = argparse.ArgumentParser(description="manual to this script")
-  arg_parser.add_argument('-c', "--client", help="run in client mode",
-                          action="store_true")
-  arg_parser.add_argument('-s', "--server", help="run in server mode",
-                          action="store_true")
-  arg_parser.add_argument('-d', "--debug", help="enable debug mode",
-                          action="store_true")
-  arg_parser.add_argument('-a', "--address", help="server address", 
-                          type=str)
-  arg_parser.add_argument('-l', "--listen_port", help="port to listen for server", 
-                          type=int)
-  arg_parser.add_argument('-f', "--name", help="file path", 
-                          type=str)
-  arg_parser.add_argument('-F', "--path_to_save", help="path to save file which was recevied from server ", 
-                          type=str)
-  arg_parser.add_argument('-m', "--multicast_address", help="address to send for receive file through multicast ", 
-                          type=str)
-
-  args = arg_parser.parse_args()
-
+def main(args):
   LOG_FORMAT = "[%(asctime)s:%(levelname)s:%(funcName)s]  %(message)s"
   log_level = logging.INFO
   if args.debug:
@@ -437,7 +421,7 @@ if __name__ == "__main__":
 
   server_ip, server_port = args.address.split(':')
 
-  sender_broker = MulticastBroker((multicast_ip, int(multicast_port)), server_ip, args.server)
+  sender_broker = MulticastBroker((multicast_ip, int(multicast_port)))
   transfer = MFileTransfer(sender_broker)
 
   if args.client:
@@ -469,5 +453,34 @@ if __name__ == "__main__":
         break;
 
     server_thread.join()
-#    server.shutdown()
-#    server.server_close()
+
+if __name__ == "__main__":
+
+  arg_parser = argparse.ArgumentParser(description="manual to this script")
+  arg_parser.add_argument('-c', "--client", help="run in client mode",
+                          action="store_true")
+  arg_parser.add_argument('-s', "--server", help="run in server mode",
+                          action="store_true")
+  arg_parser.add_argument('-d', "--debug", help="enable debug mode",
+                          action="store_true")
+  arg_parser.add_argument('-a', "--address", help="server address", 
+                          type=str)
+  arg_parser.add_argument('-l', "--listen_port", help="port to listen for server", 
+                          type=int)
+  arg_parser.add_argument('-f', "--name", help="file path", 
+                          type=str)
+  arg_parser.add_argument('-F', "--path_to_save", help="path to save file which was recevied from server ", 
+                          type=str)
+  arg_parser.add_argument('-m', "--multicast_address", help="address to send for receive file through multicast ", 
+                          type=str)
+
+  args = arg_parser.parse_args()
+
+  if not args.client and not args.server:
+      logging.warning("Run in qpython as client mode")
+      args.client=True
+      args.address="172.18.93.85:60000"
+      args.debug=True
+  main(args)
+
+
