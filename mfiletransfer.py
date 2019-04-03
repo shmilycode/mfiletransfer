@@ -23,11 +23,11 @@ def baseN(num, b):
 
 
 class MFileTransferServer:
-  def __init__(self, port, command_handler):
-    self.port = port
+  def __init__(self, address, command_handler):
+    self.addres = address 
     self.command_handler = command_handler
     self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    self.server_socket.bind(("localhost", port))
+    self.server_socket.bind(address)
     self.server_socket.listen(socket.SOMAXCONN)
     self.descriptors = [self.server_socket,]
     self.retransmission_set = set()
@@ -204,20 +204,26 @@ class CommandHandler(object):
     return jresp
 
 class MulticastBroker:
-  def __init__(self, multicast_address):
+  def __init__(self, multicast_address, server_ip, server):
     self.multicast_host, self.multicast_port = multicast_address
     self.multicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     self.multicast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    # default
-    # self.multicast_socket.setsockopt(socket.SOL_IP, socket.IP_MULTICAST_TTL, 20)
-    # self.multicast_socket.setsockopt(socket.SOL_IP, socket.IP_MULTICAST_LOOP, 1)
-    # self.multicast_socket.setsockopt(socket.SOL_IP, socket.IP_MULTICAST_IF,
-    #                     socket.inet_aton(intf) + socket.inet_aton('0.0.0.0'))
-    # join group
+
+    if server:
+        logging.warning("multicast server")
+        self.multicast_socket.bind((server_ip,self.multicast_port))
+        self.multicast_socket.connect(multicast_address)
+
+    else:
+        logging.warning("multicast client")
+        self.multicast_socket.bind(multicast_address)
+        self.multicast_socket.connect((server_ip,self.multicast_port))
+
     group = socket.inet_aton(self.multicast_host)
     mreq = struct.pack('4sL', group, socket.INADDR_ANY)
     self.multicast_socket.setsockopt(socket.SOL_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     self.data_handler = self.default_data_handler
+
 
   def default_data_handler(self, data):
     pass
@@ -226,7 +232,6 @@ class MulticastBroker:
     self.data_handler = handler
 
   def receive_loop(self):
-    self.multicast_socket.bind(('', self.multicast_port))
     while True:
       data = self.multicast_socket.recv(MAX_UDP_PACKET_SIZE)
 #      logging.debug("Multicast recv %d bytes", len(data))
@@ -391,14 +396,12 @@ def input_handler(input, server, transfer):
 
 if __name__ == "__main__":
 
-  LOG_FORMAT = "[%(asctime)s:%(levelname)s:%(funcName)s]  %(message)s"
-#  logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT)
-  logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-
   arg_parser = argparse.ArgumentParser(description="manual to this script")
   arg_parser.add_argument('-c', "--client", help="run in client mode",
                           action="store_true")
   arg_parser.add_argument('-s', "--server", help="run in server mode",
+                          action="store_true")
+  arg_parser.add_argument('-d', "--debug", help="enable debug mode",
                           action="store_true")
   arg_parser.add_argument('-a', "--address", help="server address", 
                           type=str)
@@ -413,6 +416,13 @@ if __name__ == "__main__":
 
   args = arg_parser.parse_args()
 
+  LOG_FORMAT = "[%(asctime)s:%(levelname)s:%(funcName)s]  %(message)s"
+  log_level = logging.INFO
+  if args.debug:
+    log_level = logging.DEBUG
+
+  logging.basicConfig(level=log_level, format=LOG_FORMAT)
+
   if not args.multicast_address or args.multicast_address.find(':') == -1:
     multicast_ip = "225.100.100.6"
     multicast_port  = "5555"
@@ -420,16 +430,17 @@ if __name__ == "__main__":
   else:
     multicast_ip,multicast_port = args.multicast_address.split(":")
 
-  sender_broker = MulticastBroker((multicast_ip, int(multicast_port)))
+  if not args.address:
+    logging.critical("Need server address as input, like \"127.0.0.1:60001\"")
+    arg_parser.print_help()
+    exit()
+
+  server_ip, server_port = args.address.split(':')
+
+  sender_broker = MulticastBroker((multicast_ip, int(multicast_port)), server_ip, args.server)
   transfer = MFileTransfer(sender_broker)
 
   if args.client:
-    if not args.address:
-      logging.critical("Client mode need server address like \"127.0.0.1:60001\"")
-      arg_parser.print_help()
-      exit()
-
-    server_ip, server_port = args.address.split(':')
     command_client = MFileTransferClient(CommandHandler())
     if command_client.connect(server_ip, int(server_port)):
       file_info = command_client.wait_transfer_start()
@@ -444,8 +455,7 @@ if __name__ == "__main__":
 
       receive_thread.join()
   elif args.server:
-    port = args.listen_port if args.listen_port else 60000
-    server = MFileTransferServer(port, CommandHandler())
+    server = MFileTransferServer((server_ip, int(server_port)), CommandHandler())
     server_ip, server_port = server.server_address()
 
     server_thread = threading.Thread(target=server.run)
