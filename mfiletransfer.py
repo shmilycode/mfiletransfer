@@ -14,7 +14,7 @@ import random
 MAX_LISTEN_COUNT = 60
 MAX_UDP_PACKET_SIZE = 1472
 MAX_TCP_PACKET_SIZE = 4096
-DEFAULT_BLOCK_SIZE = 1*1024*1024
+DEFAULT_BLOCK_SIZE = 5*1024*1024
 DEFAULT_SLICE_SIZE = MAX_UDP_PACKET_SIZE - 4
 
 def baseN(num, b):
@@ -237,8 +237,8 @@ class MulticastBroker:
   
   def send(self, data):
     # for test, random throw packet
-    if random.randint(0,99) < 20:
-      return
+    #if random.randint(0,99) < 20:
+    #  return
 
     if len(data) > MAX_UDP_PACKET_SIZE:
       logging.warning("Data send by multicast should less than %d, now is %d" %(MAX_UDP_PACKET_SIZE, len(data)))
@@ -289,6 +289,7 @@ class MFileTransfer:
       return
 
     file_size = os.path.getsize(file_path)
+    file_name = os.path.basename(file_path)
     max_block_size = DEFAULT_BLOCK_SIZE
     max_slice_size = DEFAULT_SLICE_SIZE
     # notify all client to receive file.
@@ -299,6 +300,7 @@ class MFileTransfer:
     # we sleep here, wait for client to become ready.
     time.sleep(0.3)
 
+    logging.info("Start deploy %s", file_name)
     for block in file_block.block_iterator(max_block_size):
       # send block to client
       self.send_block(block, max_slice_size)
@@ -316,8 +318,9 @@ class MFileTransfer:
         self.retransmit(retransmission_slices, block, max_slice_size)
       block_sum += len(block)
       self.current_block_index += 1
+      logging.info("Transmit %d", (block_sum/file_size)*100)
 
-    logging.info("Transfer file %s success", os.path.basename(file_path))
+    logging.info("Transfer file %s success", file_name)
 
   def retransmit(self, slices, block, slice_size):
     for slice_index in slices:
