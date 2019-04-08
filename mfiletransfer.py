@@ -10,6 +10,7 @@ import os
 import functools
 import time
 import random
+from subprocess import check_output
 
 MAX_LISTEN_COUNT = 60
 MAX_UDP_PACKET_SIZE = 1472
@@ -221,14 +222,10 @@ class MulticastBroker:
   def __init__(self, multicast_address):
     self.multicast_host, self.multicast_port = multicast_address
     self.multicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    self.multicast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    self.multicast_socket.bind(multicast_address)
-
-    group = socket.inet_aton(self.multicast_host)
-    mreq = struct.pack('4sL', group, socket.INADDR_ANY)
-    self.multicast_socket.setsockopt(socket.SOL_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     self.data_handler = self.default_data_handler
-
+    self.interfaces = check_output(['hostname','--all-ip-addresses'])[:-1]
+    self.interfaces = str(self.interfaces, encoding="utf-8").split(' ')[:-1]
+    logging.debug(self.interfaces)
 
   def default_data_handler(self, data):
     pass
@@ -237,13 +234,34 @@ class MulticastBroker:
     self.data_handler = handler
 
   def receive_loop(self):
-    while True:
-      data = self.multicast_socket.recv(MAX_UDP_PACKET_SIZE)
-#      logging.debug("Multicast recv %d bytes", len(data))
-      if len(data):
-        if(self.data_handler(data) == False):
-          logging.debug("Exit recve_loop")
-          break;
+    receive_sockets = []
+    for interface in self.interfaces:
+      sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+      sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+      sock.bind((interface, self.multicast_port))
+      mreq = struct.pack('4s4s', socket.inet_aton(self.multicast_host), socket.inet_aton(interface))
+      sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+      receive_sockets.append(sock) 
+
+    loop = True
+    while loop:
+      (sread, swrite, sexc) = select.select(receive_sockets, [], [])
+      for sock in sread:
+        try:
+          data = sock.recv(MAX_UDP_PACKET_SIZE)
+#          logging.debug("Multicast recv %d bytes", len(data))
+          if len(data):
+            if(self.data_handler(data) == False):
+              logging.debug("Exit recve_loop")
+              loop = False
+              break;
+        except OSError as err:
+          logging.error(err)
+          loop = False
+
+    for sock in receive_sockets:
+      sock.close()
+
   
   def send(self, data):
     # for test, random throw packet
@@ -337,8 +355,6 @@ class MFileTransfer:
       slice_start = slice_size*slice_index
       slice_end = slice_start+slice_size
       slice_end = slice_end if slice_end <= len(block) else slice_start+(len(block)-slice_start)
-      if slice_index == 714:
-        logging.debug("slice start %d, end %d"%(slice_start, slice_end))
       slice = self.pack_slice(block[slice_start:slice_end], self.current_block_index, slice_index)
       self.broker.send(slice)
 
@@ -390,8 +406,6 @@ class MFileTransfer:
     block_index,slice_index,buffer = self.unpack_slice(data)
     if block_index >= self.current_block_index and (slice_index not in self.slice_buffer):
 #      logging.debug("Receive slice %d" % slice_index)
-      if slice_index == 714:
-        logging.debug("Slice size: %d", len(data))
       self.slice_buffer[slice_index] = buffer
 
 
