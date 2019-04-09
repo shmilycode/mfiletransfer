@@ -23,6 +23,15 @@ def baseN(num, b):
     return ((num == 0) and "0") or \
            (baseN(num // b, b).lstrip("0") + "0123456789abcdefghijklmnopqrstuvwxyz"[num % b])
 
+def get_host_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+    finally:
+        s.close()
+
+    return ip
 
 class MFileTransferServer:
   def __init__(self, address, command_handler):
@@ -268,9 +277,11 @@ class MulticastBroker:
     self.multicast_host, self.multicast_port = multicast_address
     self.multicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     self.data_handler = self.default_data_handler
-    self.interfaces = check_output(['hostname','--all-ip-addresses'])[:-1]
-    self.interfaces = str(self.interfaces, encoding="utf-8").split(' ')[:-1]
+    self.interfaces = [get_host_ip(),]
+#    self.interfaces = check_output(['hostname','--all-ip-addresses'])[:-1]
+#    self.interfaces = str(self.interfaces, encoding="utf-8").split(' ')[:-1]
     self.interfaces.append('0.0.0.0')
+    self.stop = False
     logging.debug(self.interfaces)
 
   def default_data_handler(self, data):
@@ -279,7 +290,11 @@ class MulticastBroker:
   def set_data_handler(self, handler):
     self.data_handler = handler
 
+  def stop_receive(self):
+    self.stop = True
+
   def receive_loop(self):
+    self.stop = False
     receive_sockets = []
     for interface in self.interfaces:
       sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -290,7 +305,7 @@ class MulticastBroker:
       receive_sockets.append(sock) 
 
     loop = True
-    while loop:
+    while loop and not self.stop:
       (sread, swrite, sexc) = select.select(receive_sockets, [], [])
       for sock in sread:
         try:
@@ -405,33 +420,36 @@ class MFileTransfer:
       self.broker.send(slice)
 
   def save_file(self, client, path_to_save, file_info):
+    self.slice_buffer = {}
+    self.current_block_index = 0
     file_name,file_size,block_size,slice_size = file_info
     file_name = os.path.basename(file_name)
     slice_count = int((block_size-1) / slice_size) + 1
-    if not os.path.exists(path_to_save) or os.path.isdir(path_to_save):
-      logging.error("path \"%s\" not existe or not directory, saving to current directory %s."%(path_to_save,file_name))
-      path_to_save = file_name
-    else:
-      path_to_save = path_to_save + '/' + file_name
-      logging.info("Saving file to %s"%(path_to_save))
+#    if not os.path.exists(path_to_save) or os.path.isdir(path_to_save):
+#      logging.error("path \"%s\" not existe or not directory, saving to current directory %s."%(path_to_save,file_name))
+#      path_to_save = file_name
+#    else:
+#      path_to_save = path_to_save + '/' + file_name
+#      logging.info("Saving file to %s"%(path_to_save))
     # receive block complete confirm request
-    with open(path_to_save, 'wb') as saved_file:
-      while True:
-        if True == client.wait_server_command():
-          missing_slice = self.get_missing_slice(slice_count) 
-          if not len(missing_slice):
-            self.sync_data(saved_file, slice_count)
-          client.retransmission_request(missing_slice)
-        else: #receive file transfer complete confirm request
-          left_file_size = file_size - self.current_block_index*block_size
-          logging.debug("left file size: %d", left_file_size)
-          slice_count = int((left_file_size-1)/slice_size + 1)
-          missing_slice = self.get_missing_slice(slice_count) 
-          client.retransmission_request(missing_slice)
-          if not len(missing_slice):
-            self.sync_data(saved_file, slice_count)
-            break
-      logging.info("Saving file %s success!",file_name)
+#    with open(path_to_save, 'wb') as saved_file:
+    saved_file = 0
+    while True:
+      if True == client.wait_server_command():
+        missing_slice = self.get_missing_slice(slice_count) 
+        if not len(missing_slice):
+          self.sync_data(saved_file, slice_count)
+        client.retransmission_request(missing_slice)
+      else: #receive file transfer complete confirm request
+        left_file_size = file_size - self.current_block_index*block_size
+        logging.debug("left file size: %d", left_file_size)
+        slice_count = int((left_file_size-1)/slice_size + 1)
+        missing_slice = self.get_missing_slice(slice_count) 
+        client.retransmission_request(missing_slice)
+        if not len(missing_slice):
+          self.sync_data(saved_file, slice_count)
+          break
+    logging.error("Saving file %s success!",file_name)
 
   def get_missing_slice(self, slice_count):
     missing_slices = []
@@ -442,8 +460,8 @@ class MFileTransfer:
   
   def sync_data(self, file, slice_count):
     logging.debug("curren_block_index: %d, slice_count: %d"%(self.current_block_index, slice_count))
-    for slice_index in range(slice_count):
-      file.write(self.slice_buffer[slice_index])
+#    for slice_index in range(slice_count):
+#      file.write(self.slice_buffer[slice_index])
     self.slice_buffer = {}
     self.current_block_index += 1
 
@@ -487,17 +505,18 @@ def main(args):
   if args.client:
     command_client = MFileTransferClient(CommandHandler())
     if command_client.connect(server_ip, int(server_port)):
-      file_info = command_client.wait_transfer_start()
-      logging.debug("Get start signal")
-      sender_broker.set_data_handler(transfer.receive_slice_handler)
-      receive_thread = threading.Thread(target=sender_broker.receive_loop)
-      receive_thread.daemon = True
-      receive_thread.start()
-
-      path_to_save = args.path_to_save if args.path_to_save else "tmp"
-      transfer.save_file(command_client, path_to_save, file_info)
-
-      receive_thread.join()
+      while True:
+        file_info = command_client.wait_transfer_start()
+        logging.debug("Get start signal")
+        sender_broker.set_data_handler(transfer.receive_slice_handler)
+        receive_thread = threading.Thread(target=sender_broker.receive_loop)
+        receive_thread.daemon = True
+        receive_thread.start()
+  
+        path_to_save = args.path_to_save if args.path_to_save else "tmp"
+        transfer.save_file(command_client, path_to_save, file_info)
+        sender_broker.stop_receive()
+        receive_thread.join()
   elif args.server:
     server = MFileTransferServer((server_ip, int(server_port)), CommandHandler())
     server_ip, server_port = server.server_address()
@@ -539,7 +558,7 @@ if __name__ == "__main__":
   if not args.client and not args.server:
       logging.warning("Run in qpython as client mode")
       args.client=True
-      args.address="172.18.93.85:60000"
+      args.address="192.168.1.101:6001"
       args.debug=True
   main(args)
 
