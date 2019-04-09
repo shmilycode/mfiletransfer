@@ -11,6 +11,7 @@ import functools
 import time
 import random
 from subprocess import check_output
+from ctypes import create_string_buffer
 
 MAX_LISTEN_COUNT = 60
 MAX_UDP_PACKET_SIZE = 1472
@@ -67,6 +68,7 @@ class MFileTransferServer:
     if not request:
       return
 
+    logging.debug(request)
     if request['type'] == CommandHandler.RetransmissionRequest:
       if 'slice_list' in request:
         slice_list = [int(slice) for slice in request['slice_list'].split(',')]
@@ -136,7 +138,7 @@ class MFileTransferClient:
     while True:
       data = self.socket.recv(MAX_TCP_PACKET_SIZE)
       if len(data):
-        result = self.command_handler.parse_server_request(data.decode('utf-8'))
+        result = self.command_handler.parse_server_request(data)
         if result["type"] != CommandHandler.TransferStartNotify:
           continue
         return result["name"],result["size"],result["block_size"],result["slice_size"]
@@ -147,7 +149,7 @@ class MFileTransferClient:
      while True:
       data = self.socket.recv(MAX_TCP_PACKET_SIZE)
       if len(data):
-        result = self.command_handler.parse_server_request(data.decode('utf-8'))
+        result = self.command_handler.parse_server_request(data)
         if result["type"] == CommandHandler.TransferCompleteConfirm:
           return False
         elif result["type"] == CommandHandler.BlockCompleteConfirm:
@@ -181,39 +183,82 @@ class CommandHandler(object):
     return CommandHandler._instance
 
   def parse_server_request(self, data):
-    logging.debug(data)
-    jresp = json.loads(data)
+    request_type = ord(data[:1])
+    jresp = {}
+    if request_type == CommandHandler.TransferStartNotify:
+      name_len = ord(data[1:2])
+      ttype,name_size,name,size,block_size,slice_size = struct.unpack('BB'+str(name_len)+'sQII', data)
+      jresp = {"type": ttype, "name": name.decode('utf-8'), "size": size, 
+               "block_size": block_size, "slice_size": slice_size}
+    elif request_type == CommandHandler.BlockCompleteConfirm:
+      jresp = {"type": CommandHandler.BlockCompleteConfirm}
+    elif request_type == CommandHandler.TransferCompleteConfirm:
+      jresp = {"type": CommandHandler.TransferCompleteConfirm}
+    else:
+      logging.error('Unkonw type %d'%(request_type))
+    logging.debug(jresp)
     return jresp
 
   def build_transfer_start_request(self, name, size, block_size, slice_size):
     jresp = {"type": CommandHandler.TransferStartNotify, "name": name, "size": size, 
              "block_size": block_size, "slice_size": slice_size}
+  
+    bresp = struct.pack('BB'+str(len(name))+'sQII', CommandHandler.TransferStartNotify, len(name), name.encode('utf-8'),
+                         size, block_size, slice_size)
     logging.debug(jresp)
-    return bytes(json.dumps(jresp).encode('utf-8'))
+    return bresp
   
   def build_block_complete_confirm(self):
     jresp = {"type": CommandHandler.BlockCompleteConfirm}
+    bresp = struct.pack('B', CommandHandler.BlockCompleteConfirm)
     logging.debug(jresp)
-    return bytes(json.dumps(jresp).encode('utf-8'))
+    return bresp
 
   def build_transfer_complete_confirm(self):
     jresp = {"type": CommandHandler.TransferCompleteConfirm}
+    bresp = struct.pack('B', CommandHandler.TransferCompleteConfirm)
     logging.debug(jresp)
-    return bytes(json.dumps(jresp).encode('utf-8'))
+    return bresp
 
   def build_retransmission_request(self, packet_list):
     jresp = {'type': CommandHandler.RetransmissionRequest}
     if len(packet_list):
       list_str = ",".join(str(id) for id in packet_list)
       jresp['slice_list'] = list_str
-
     logging.debug(jresp)
-    return bytes(json.dumps(jresp).encode('utf-8'))
+
+    # Use two bytes to store one index, list end with 0xFFFF
+    bresp = struct.pack('B', CommandHandler.RetransmissionRequest)
+    list_size = (len(packet_list) + 1) * 2
+    bresp = create_string_buffer(list_size+1)
+    struct.pack_into('B', bresp, 0, CommandHandler.RetransmissionRequest)
+    start_pos = 1
+
+    if len(packet_list):
+      for idx in packet_list:
+        struct.pack_into('H', bresp, start_pos, idx)
+        start_pos += 2
+
+    struct.pack_into('H', bresp, start_pos, 0xffff)
+    return bresp
 
   def parse_client_request(self, data):
     try:
-      jresp = json.loads(data.decode('utf-8'))
-      return jresp
+      logging.debug("client request %d bytes"%len(data))
+      end, = struct.unpack('H', data[-2:])
+      if end == 0xffff:
+        data_len = len(data)
+        cur_pos = 1
+        jresp = {'type': ord(data[:1])}
+        data_list = []
+
+        while cur_pos < data_len:
+          idx, = struct.unpack_from('H', data, cur_pos)
+          data_list.append(str(idx))
+          cur_pos += 2
+        if len(data_list) > 1:
+          jresp['slice_list'] = ",".join(data_id for data_id in data_list[:-1])
+        return jresp
     except ValueError as err:
       logging.debug("Can' parse data, please wait.")
       return None
@@ -225,6 +270,7 @@ class MulticastBroker:
     self.data_handler = self.default_data_handler
     self.interfaces = check_output(['hostname','--all-ip-addresses'])[:-1]
     self.interfaces = str(self.interfaces, encoding="utf-8").split(' ')[:-1]
+    self.interfaces.append('0.0.0.0')
     logging.debug(self.interfaces)
 
   def default_data_handler(self, data):
@@ -265,8 +311,8 @@ class MulticastBroker:
   
   def send(self, data):
     # for test, random throw packet
-    #if random.randint(0,99) < 20:
-    #  return
+    if random.randint(0,99) < 20:
+      return
 
     if len(data) > MAX_UDP_PACKET_SIZE:
       logging.warning("Data send by multicast should less than %d, now is %d" %(MAX_UDP_PACKET_SIZE, len(data)))
