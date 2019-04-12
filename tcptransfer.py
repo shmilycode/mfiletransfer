@@ -32,6 +32,7 @@ class MFileTransferServer:
     self.descriptors = [self.server_socket,]
     self.client_buffer = {}
     self.task_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    self.response_client_list = []
   
   def server_address(self):
     return self.server_socket.getsockname()
@@ -47,7 +48,7 @@ class MFileTransferServer:
             data = client.recv(MAX_TCP_PACKET_SIZE)
             if len(data):
               # push into client_buffer
-              self.request_handler(data)
+              self.request_handler(client, data)
             else:
               logging.info("%s:%s client disconnected!" % client.getpeername())
               client.close()
@@ -58,7 +59,7 @@ class MFileTransferServer:
             self.descriptors.remove(client)
             del self.client_buffer[client]
 
-  def request_handler(self, data):
+  def request_handler(self, client, data):
     request = self.command_handler.parse_client_request(data)
     # failed to decode, fill to buffer
     if not request:
@@ -66,6 +67,8 @@ class MFileTransferServer:
 
     logging.debug(request)
     if request['type'] == CommandHandler.ReadyToReceive:
+      self.response_client_list.append(client)
+    if len(self.response_client_list) == (len(self.descriptors) - 1):
       self.start_all_transfer_task();
 
 
@@ -84,13 +87,14 @@ class MFileTransferServer:
       logging.error(err)
 
   def transfer_start_request(self, name, size, data):
+    self.transfer_start_time = time.time()
     self.file_data = data
     request = self.command_handler.build_transfer_start_request(
       name, size)
     self.broadcast(request)
+    self.response_client_list = []
   
   def start_all_transfer_task(self):
-    start_time = time.time()
     executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     all_task = []
     for client in self.descriptors[1:]:
@@ -99,8 +103,8 @@ class MFileTransferServer:
     for future in as_completed(all_task):
       client = future.result()
 
-    end_time = time.time()
-    logging.info("Transfer all finished, spend %f!"%(end_time-start_time))
+    self.transfer_end_time = time.time()
+    logging.info("Transfer all finished, spend %f!"%(self.transfer_end_time-self.transfer_start_time))
   
 
 class MFileTransferClient:
