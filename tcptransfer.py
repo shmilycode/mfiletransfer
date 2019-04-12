@@ -140,6 +140,7 @@ class MFileTransferClient:
   
   def get_file(self, file_name, file_size):
     size_read = 0
+    time_count = 0
     with open(file_name, 'wb') as file_to_write:
       while size_read < file_size:
         data = self.socket.recv(MAX_TCP_PACKET_SIZE)
@@ -150,6 +151,13 @@ class MFileTransferClient:
           file_to_write.write(data)
         else:
           break;
+        if not (time_count % 20):
+          sys.stdout.write("%.2f"%((size_read/file_size)*100))
+          sys.stdout.write('\r') 
+          sys.stdout.flush()
+          time_count = 0
+        else:
+          time_count += 1
 
 # Singletone class
 class CommandHandler(object):
