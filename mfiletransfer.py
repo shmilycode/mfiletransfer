@@ -19,10 +19,15 @@ MAX_TCP_PACKET_SIZE = 4096
 DEFAULT_BLOCK_SIZE = 5*1024*1024
 DEFAULT_SLICE_SIZE = MAX_UDP_PACKET_SIZE - 4
 
-def baseN(num, b):
-    return ((num == 0) and "0") or \
-           (baseN(num // b, b).lstrip("0") + "0123456789abcdefghijklmnopqrstuvwxyz"[num % b])
+def get_host_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+    finally:
+        s.close()
 
+    return ip
 
 class MFileTransferServer:
   def __init__(self, address, command_handler):
@@ -101,16 +106,16 @@ class MFileTransferServer:
     self.response_client_list = set()
 
   # may block here, because we have to wait for all clients response
-  def get_retransmission_slices(self, last_block):
+  def get_retransmission_slices(self, block_index, last_block):
     # send block complete confirm, waitting for retransmission
     if not last_block:
-      request = self.command_handler.build_block_complete_confirm()
+      request = self.command_handler.build_block_complete_confirm(block_index)
     else:
-      request = self.command_handler.build_transfer_complete_confirm()
+      request = self.command_handler.build_transfer_complete_confirm(block_index)
     self.broadcast(request)
     while len(self.response_client_list) != (len(self.descriptors) - 1):
       logging.debug("Waitting for all clients to response")
-      time.sleep(0.1)
+      time.sleep(0.005)
     return list(self.retransmission_set)
 
 
@@ -139,9 +144,11 @@ class MFileTransferClient:
       data = self.socket.recv(MAX_TCP_PACKET_SIZE)
       if len(data):
         result = self.command_handler.parse_server_request(data)
-        if result["type"] != CommandHandler.TransferStartNotify:
-          continue
-        return result["name"],result["size"],result["block_size"],result["slice_size"]
+        if result["type"] == CommandHandler.TransferStartNotify:
+          return result["name"],result["size"],result["block_size"],result["slice_size"]
+        elif result["type"] == CommandHandler.TransferCompleteConfirm:
+          logging.error("What, I don't know!")
+          self.socket.sendall(self.command_handler.build_retransmission_request([]))
       else:
         break;
     
@@ -151,9 +158,9 @@ class MFileTransferClient:
       if len(data):
         result = self.command_handler.parse_server_request(data)
         if result["type"] == CommandHandler.TransferCompleteConfirm:
-          return False
+          return False,result["block"]
         elif result["type"] == CommandHandler.BlockCompleteConfirm:
-          return True
+          return True,result["block"]
       else:
         break;
 
@@ -191,9 +198,11 @@ class CommandHandler(object):
       jresp = {"type": ttype, "name": name.decode('utf-8'), "size": size, 
                "block_size": block_size, "slice_size": slice_size}
     elif request_type == CommandHandler.BlockCompleteConfirm:
-      jresp = {"type": CommandHandler.BlockCompleteConfirm}
+      rtype, block_index = struct.unpack('Bi', data)
+      jresp = {"type": CommandHandler.BlockCompleteConfirm, "block":block_index}
     elif request_type == CommandHandler.TransferCompleteConfirm:
-      jresp = {"type": CommandHandler.TransferCompleteConfirm}
+      rtype, block_index = struct.unpack('Bi', data)
+      jresp = {"type": CommandHandler.TransferCompleteConfirm, "block":block_index}
     else:
       logging.error('Unkonw type %d'%(request_type))
     logging.debug(jresp)
@@ -208,15 +217,15 @@ class CommandHandler(object):
     logging.debug(jresp)
     return bresp
   
-  def build_block_complete_confirm(self):
-    jresp = {"type": CommandHandler.BlockCompleteConfirm}
-    bresp = struct.pack('B', CommandHandler.BlockCompleteConfirm)
+  def build_block_complete_confirm(self, block_index):
+    jresp = {"type": CommandHandler.BlockCompleteConfirm, "block":block_index}
+    bresp = struct.pack('Bi', CommandHandler.BlockCompleteConfirm, block_index)
     logging.debug(jresp)
     return bresp
 
-  def build_transfer_complete_confirm(self):
+  def build_transfer_complete_confirm(self, block_index):
     jresp = {"type": CommandHandler.TransferCompleteConfirm}
-    bresp = struct.pack('B', CommandHandler.TransferCompleteConfirm)
+    bresp = struct.pack('Bi', CommandHandler.TransferCompleteConfirm, block_index)
     logging.debug(jresp)
     return bresp
 
@@ -268,9 +277,11 @@ class MulticastBroker:
     self.multicast_host, self.multicast_port = multicast_address
     self.multicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     self.data_handler = self.default_data_handler
-    self.interfaces = check_output(['hostname','--all-ip-addresses'])[:-1]
-    self.interfaces = str(self.interfaces, encoding="utf-8").split(' ')[:-1]
+    self.interfaces = [get_host_ip(),]
+#    self.interfaces = check_output(['hostname','--all-ip-addresses'])[:-1]
+#    self.interfaces = str(self.interfaces, encoding="utf-8").split(' ')[:-1]
     self.interfaces.append('0.0.0.0')
+    self.stop = False
     logging.debug(self.interfaces)
 
   def default_data_handler(self, data):
@@ -279,7 +290,11 @@ class MulticastBroker:
   def set_data_handler(self, handler):
     self.data_handler = handler
 
+  def stop_receive(self):
+    self.stop = True
+
   def receive_loop(self):
+    self.stop = False
     receive_sockets = []
     for interface in self.interfaces:
       sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -290,7 +305,7 @@ class MulticastBroker:
       receive_sockets.append(sock) 
 
     loop = True
-    while loop:
+    while loop and not self.stop:
       (sread, swrite, sexc) = select.select(receive_sockets, [], [])
       for sock in sread:
         try:
@@ -356,8 +371,10 @@ class MFileTransfer:
       file_slice = block[block_slice_index*slice_size:(block_slice_index+1)*slice_size]
       slice = self.pack_slice(file_slice, self.current_block_index, block_slice_index)
       self.broker.send(slice)
+    return slice_count
 
   def file_transfer(self, server, file_path):
+    self.current_block_index = 0
     if not os.path.exists(file_path):
       logging.error("file %s not exist!", file_path)
       return
@@ -370,6 +387,8 @@ class MFileTransfer:
     server.transfer_start_request(file_path, file_size, max_block_size, max_slice_size)
     file_block = FileBlock(file_path)
     block_sum = 0
+    total_retransmission_count = 0
+    total_slice_count = 0
 
     # we sleep here, wait for client to become ready.
     time.sleep(0.3)
@@ -377,16 +396,17 @@ class MFileTransfer:
     logging.info("Start deploy %s", file_name)
     for block in file_block.block_iterator(max_block_size):
       # send block to client
-      self.send_block(block, max_slice_size)
+      total_slice_count += self.send_block(block, max_slice_size)
       # last block
       is_last_block = False
       if file_size - block_sum <= max_block_size:
         is_last_block = True
       # retransmit all losing slice
       while True:
-        time.sleep(0.1)
+#        time.sleep(0.5)
         server.need_block_complete_confirm(True)
-        retransmission_slices = server.get_retransmission_slices(is_last_block)
+        retransmission_slices = server.get_retransmission_slices(self.current_block_index, is_last_block)
+        total_retransmission_count += len(retransmission_slices)
         if not len(retransmission_slices):
           break;
         self.retransmit(retransmission_slices, block, max_slice_size)
@@ -394,7 +414,8 @@ class MFileTransfer:
       self.current_block_index += 1
       logging.info("Transmit %d", (block_sum/file_size)*100)
 
-    logging.info("Transfer file %s success", file_name)
+    logging.info("Transfer file %s success, slice %d, retransmiss %d"%(
+                 file_name, total_slice_count, total_retransmission_count))
 
   def retransmit(self, slices, block, slice_size):
     for slice_index in slices:
@@ -405,6 +426,8 @@ class MFileTransfer:
       self.broker.send(slice)
 
   def save_file(self, client, path_to_save, file_info):
+    self.slice_buffer = {}
+    self.current_block_index = 0
     file_name,file_size,block_size,slice_size = file_info
     file_name = os.path.basename(file_name)
     slice_count = int((block_size-1) / slice_size) + 1
@@ -417,8 +440,12 @@ class MFileTransfer:
     # receive block complete confirm request
     with open(path_to_save, 'wb') as saved_file:
       while True:
-        if True == client.wait_server_command():
-          missing_slice = self.get_missing_slice(slice_count) 
+        not_finish, server_block_index = client.wait_server_command()
+        if True == not_finish:
+          if server_block_index < self.current_block_index:
+            missing_slice = []
+          else:
+            missing_slice = self.get_missing_slice(slice_count)
           if not len(missing_slice):
             self.sync_data(saved_file, slice_count)
           client.retransmission_request(missing_slice)
@@ -438,6 +465,7 @@ class MFileTransfer:
     for slice_index in range(slice_count):
       if slice_index not in self.slice_buffer:
         missing_slices.append(slice_index)
+    logging.error("Ask %d retransmission slice"%len(missing_slices))
     return missing_slices
   
   def sync_data(self, file, slice_count):
@@ -487,17 +515,18 @@ def main(args):
   if args.client:
     command_client = MFileTransferClient(CommandHandler())
     if command_client.connect(server_ip, int(server_port)):
-      file_info = command_client.wait_transfer_start()
-      logging.debug("Get start signal")
-      sender_broker.set_data_handler(transfer.receive_slice_handler)
-      receive_thread = threading.Thread(target=sender_broker.receive_loop)
-      receive_thread.daemon = True
-      receive_thread.start()
-
-      path_to_save = args.path_to_save if args.path_to_save else "tmp"
-      transfer.save_file(command_client, path_to_save, file_info)
-
-      receive_thread.join()
+      while True:
+        file_info = command_client.wait_transfer_start()
+        logging.debug("Get start signal")
+        sender_broker.set_data_handler(transfer.receive_slice_handler)
+        receive_thread = threading.Thread(target=sender_broker.receive_loop)
+        receive_thread.daemon = True
+        receive_thread.start()
+  
+        path_to_save = args.path_to_save if args.path_to_save else "tmp"
+        transfer.save_file(command_client, path_to_save, file_info)
+        sender_broker.stop_receive()
+        receive_thread.join()
   elif args.server:
     server = MFileTransferServer((server_ip, int(server_port)), CommandHandler())
     server_ip, server_port = server.server_address()

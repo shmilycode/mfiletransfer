@@ -66,10 +66,18 @@ class MFileTransferServer:
       return
 
     logging.debug(request)
-    if request['type'] == CommandHandler.ReadyToReceive:
+    rtype = request['type']
+    if rtype == CommandHandler.ReadyToReceive or (
+      rtype == CommandHandler.ClientFinish):
       self.response_client_list.append(client)
-    if len(self.response_client_list) == (len(self.descriptors) - 1):
+    if rtype == CommandHandler.ReadyToReceive and (
+      len(self.response_client_list) == (len(self.descriptors) - 1)):
       self.start_all_transfer_task();
+    if rtype == CommandHandler.ClientFinish:
+      time = request['time']
+      self.total_time += time
+      if (len(self.response_client_list) == (len(self.descriptors) - 1)):
+        logging.info("Mean value of tranfer time: %f", self.total_time/len(self.response_client_list))
 
 
   def accept_new_connection(self):
@@ -93,6 +101,7 @@ class MFileTransferServer:
       name, size)
     self.broadcast(request)
     self.response_client_list = []
+    logging.info("Total client: %d", len(self.descriptors)-1)
   
   def start_all_transfer_task(self):
     executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -105,7 +114,8 @@ class MFileTransferServer:
 
     self.transfer_end_time = time.time()
     logging.info("Transfer all finished, spend %f!"%(self.transfer_end_time-self.transfer_start_time))
-  
+    self.response_client_list = []
+    self.total_time = 0.0
 
 class MFileTransferClient:
   def __init__(self, command_handler):
@@ -141,7 +151,11 @@ class MFileTransferClient:
   def ready_to_receive(self):
     request = self.command_handler.build_ready_to_receive_request()
     self.socket.sendall(request)
-  
+
+  def send_client_finish(self, time):
+    request = self.command_handler.build_client_finished_confirm(time)
+    self.socket.sendall(request)
+
   def get_file(self, file_name, file_size):
     size_read = 0
     time_count = 0
@@ -168,6 +182,7 @@ class CommandHandler(object):
   _instance_lock = threading.Lock()
   TransferStartNotify = 0
   ReadyToReceive = 1
+  ClientFinish = 2
 
   def __new__(cls, *args, **kwargs):
     if not hasattr(CommandHandler, "_instance"):
@@ -203,6 +218,13 @@ class CommandHandler(object):
     logging.debug(jresp)
     return bresp
 
+  def build_client_finished_confirm(self, time):
+    jresp = {"type": CommandHandler.ClientFinish}
+  
+    bresp = struct.pack('Bf',  CommandHandler.ClientFinish, time)
+    logging.debug(jresp)
+    return bresp
+
   def build_block_complete_confirm(self):
     jresp = {"type": CommandHandler.BlockCompleteConfirm}
     bresp = struct.pack('B', CommandHandler.BlockCompleteConfirm)
@@ -217,7 +239,12 @@ class CommandHandler(object):
 
   def parse_client_request(self, data):
     logging.debug("client request %d bytes"%len(data))
-    jresp = {'type': ord(data[:1])}
+    rtype = ord(data[:1])
+    if rtype == CommandHandler.ReadyToReceive:
+      jresp = {'type': rtype}
+    elif rtype == CommandHandler.ClientFinish:
+      rtype,time = struct.unpack('Bf', data)
+      jresp = {'type': rtype, 'time': time}
     return jresp
 
 
@@ -263,7 +290,8 @@ def main(args):
         command_client.ready_to_receive()
         command_client.get_file(file_name, file_size)
         end_time = time.time()
-        logging.info("Save file success, spend %f", end_time-start_time)
+        logging.error("Save file success, spend %f", end_time-start_time)
+        command_client.send_client_finish(end_time-start_time)
 
   elif args.server:
     server = MFileTransferServer((server_ip, int(server_port)), CommandHandler())
