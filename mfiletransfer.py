@@ -391,7 +391,7 @@ class MFileTransfer:
 
     # we sleep here, wait for client to become ready.
     time.sleep(0.3)
-
+    start_time = time.time()
     logging.info("Start deploy %s", file_name)
     for block in file_block.block_iterator(max_block_size):
       # send block to client
@@ -413,8 +413,8 @@ class MFileTransfer:
       self.current_block_index += 1
       logging.info("Transmit %d", (block_sum/file_size)*100)
 
-    logging.info("Transfer file %s success, slice %d, retransmiss %d"%(
-                 file_name, total_slice_count, total_retransmission_count))
+    logging.info("Transfer file %s success, slice %d, retransmiss %d, spend %f"%(
+                 file_name, total_slice_count, total_retransmission_count, time.time()-start_time))
 
   def retransmit(self, slices, block, slice_size):
     for slice_index in slices:

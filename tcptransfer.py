@@ -10,7 +10,9 @@ import os
 import functools
 import time
 import random
-from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED, as_completed
+from sys import version_info
+if version_info.major != 2:
+  from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED, as_completed
 
 MAX_WORKERS = 60
 MAX_TCP_PACKET_SIZE = 4096
@@ -95,13 +97,13 @@ class MFileTransferServer:
       logging.error(err)
 
   def transfer_start_request(self, name, size, data):
-    self.transfer_start_time = time.time()
     self.file_data = data
     request = self.command_handler.build_transfer_start_request(
       name, size)
     self.broadcast(request)
     self.response_client_list = []
     logging.info("Total client: %d", len(self.descriptors)-1)
+    self.transfer_start_time = time.time()
   
   def start_all_transfer_task(self):
     executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
