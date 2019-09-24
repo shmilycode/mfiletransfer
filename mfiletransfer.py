@@ -274,13 +274,12 @@ class CommandHandler(object):
 
 class MulticastBroker:
   def __init__(self, multicast_address):
+    host_ip = get_host_ip()
     self.multicast_host, self.multicast_port = multicast_address
     self.multicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    self.multicast_socket.bind((host_ip, 0))
     self.data_handler = self.default_data_handler
-    self.interfaces = [get_host_ip(),]
-#    self.interfaces = check_output(['hostname','--all-ip-addresses'])[:-1]
-#    self.interfaces = str(self.interfaces, encoding="utf-8").split(' ')[:-1]
-    self.interfaces.append('0.0.0.0')
+    self.interfaces = [host_ip,]
     self.stop = False
     logging.debug(self.interfaces)
 
@@ -299,7 +298,7 @@ class MulticastBroker:
     for interface in self.interfaces:
       sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
       sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-      sock.bind((interface, self.multicast_port))
+      sock.bind(("0.0.0.0", self.multicast_port))
       mreq = struct.pack('4s4s', socket.inet_aton(self.multicast_host), socket.inet_aton(interface))
       sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
       receive_sockets.append(sock) 
