@@ -495,8 +495,8 @@ def main(args):
   logging.basicConfig(level=log_level, format=LOG_FORMAT)
 
   if not args.multicast_address or args.multicast_address.find(':') == -1:
-    multicast_ip = "225.100.100.6"
-    multicast_port  = "5555"
+    multicast_ip = "239.0.0.100"
+    multicast_port  = "5004"
     logging.info("Using default muticast address %s:%s", multicast_ip, multicast_port)
   else:
     multicast_ip,multicast_port = args.multicast_address.split(":")
