@@ -305,7 +305,7 @@ class MulticastBroker:
 
     loop = True
     while loop and not self.stop:
-      (sread, swrite, sexc) = select.select(receive_sockets, [], [])
+      (sread, swrite, sexc) = select.select(receive_sockets, [], [], 0.1)
       for sock in sread:
         try:
           data = sock.recv(MAX_UDP_PACKET_SIZE)
@@ -430,7 +430,7 @@ class MFileTransfer:
     file_name,file_size,block_size,slice_size = file_info
     file_name = os.path.basename(file_name)
     slice_count = int((block_size-1) / slice_size) + 1
-    if not os.path.exists(path_to_save) or os.path.isdir(path_to_save):
+    if not os.path.exists(path_to_save) or not os.path.isdir(path_to_save):
       logging.error("path \"%s\" not existe or not directory, saving to current directory %s."%(path_to_save,file_name))
       path_to_save = file_name
     else:
@@ -522,7 +522,7 @@ def main(args):
         receive_thread.daemon = True
         receive_thread.start()
   
-        path_to_save = args.path_to_save if args.path_to_save else "tmp"
+        path_to_save = args.path_to_save if args.path_to_save else "/tmp"
         transfer.save_file(command_client, path_to_save, file_info)
         sender_broker.stop_receive()
         receive_thread.join()
