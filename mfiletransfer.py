@@ -16,7 +16,7 @@ from ctypes import create_string_buffer
 MAX_LISTEN_COUNT = 60
 MAX_UDP_PACKET_SIZE = 1472
 MAX_TCP_PACKET_SIZE = 4096
-DEFAULT_BLOCK_SIZE = 5*1024*1024
+DEFAULT_BLOCK_SIZE = 10*1024*1024
 DEFAULT_SLICE_SIZE = MAX_UDP_PACKET_SIZE - 4
 
 def baseN(num, b):
@@ -101,6 +101,7 @@ class MFileTransferServer:
       logging.error(err)
 
   def transfer_start_request(self, name, size, block_size, slice_size):
+    self.transfer_start_time = time.time()
     request = self.command_handler.build_transfer_start_request(
       name, size, block_size, slice_size)
     self.broadcast(request)
@@ -148,9 +149,11 @@ class MFileTransferClient:
       data = self.socket.recv(MAX_TCP_PACKET_SIZE)
       if len(data):
         result = self.command_handler.parse_server_request(data)
-        if result["type"] != CommandHandler.TransferStartNotify:
-          continue
-        return result["name"],result["size"],result["block_size"],result["slice_size"]
+        if result["type"] == CommandHandler.TransferStartNotify:
+          return result["name"],result["size"],result["block_size"],result["slice_size"]
+        elif result["type"] == CommandHandler.TransferCompleteConfirm:
+          logging.error("What, I don't know!")
+          self.socket.sendall(self.command_handler.build_retransmission_request([]))
       else:
         break;
     
@@ -159,10 +162,11 @@ class MFileTransferClient:
       data = self.socket.recv(MAX_TCP_PACKET_SIZE)
       if len(data):
         result = self.command_handler.parse_server_request(data)
+        logging.error(result)
         if result["type"] == CommandHandler.TransferCompleteConfirm:
-          return False
+          return False, result["block"]
         elif result["type"] == CommandHandler.BlockCompleteConfirm:
-          return True
+          return True, result["block"]
       else:
         break;
 
@@ -200,9 +204,11 @@ class CommandHandler(object):
       jresp = {"type": ttype, "name": name.decode('utf-8'), "size": size, 
                "block_size": block_size, "slice_size": slice_size}
     elif request_type == CommandHandler.BlockCompleteConfirm:
-      jresp = {"type": CommandHandler.BlockCompleteConfirm}
+      rtype, block_index = struct.unpack('Bi', data)
+      jresp = {"type": CommandHandler.BlockCompleteConfirm, "block":block_index}
     elif request_type == CommandHandler.TransferCompleteConfirm:
-      jresp = {"type": CommandHandler.TransferCompleteConfirm}
+      rtype, block_index = struct.unpack('Bi', data)
+      jresp = {"type": CommandHandler.TransferCompleteConfirm, "block":block_index}
     else:
       logging.error('Unkonw type %d'%(request_type))
     logging.debug(jresp)
@@ -310,7 +316,7 @@ class MulticastBroker:
       for sock in sread:
         try:
           data = sock.recv(MAX_UDP_PACKET_SIZE)
-#          logging.debug("Multicast recv %d bytes", len(data))
+#          logging.error("Multicast recv %d bytes", len(data))
           if len(data):
             if(self.data_handler(data) == False):
               logging.debug("Exit recve_loop")
@@ -371,8 +377,10 @@ class MFileTransfer:
       file_slice = block[block_slice_index*slice_size:(block_slice_index+1)*slice_size]
       slice = self.pack_slice(file_slice, self.current_block_index, block_slice_index)
       self.broker.send(slice)
+    return slice_count
 
   def file_transfer(self, server, file_path):
+    self.current_block_index = 0
     if not os.path.exists(file_path):
       logging.error("file %s not exist!", file_path)
       return
@@ -385,6 +393,8 @@ class MFileTransfer:
     server.transfer_start_request(file_path, file_size, max_block_size, max_slice_size)
     file_block = FileBlock(file_path)
     block_sum = 0
+    total_retransmission_count = 0
+    total_slice_count = 0
 
     # we sleep here, wait for client to become ready.
     time.sleep(0.3)
@@ -392,7 +402,7 @@ class MFileTransfer:
     logging.info("Start deploy %s", file_name)
     for block in file_block.block_iterator(max_block_size):
       # send block to client
-      self.send_block(block, max_slice_size)
+      total_slice_count += self.send_block(block, max_slice_size)
       # last block
       is_last_block = False
       if file_size - block_sum <= max_block_size:
@@ -402,6 +412,7 @@ class MFileTransfer:
         time.sleep(0.1)
         server.need_block_complete_confirm(True)
         retransmission_slices = server.get_retransmission_slices(is_last_block)
+        total_retransmission_count += len(retransmission_slices)
         if not len(retransmission_slices):
           break;
         self.retransmit(retransmission_slices, block, max_slice_size)
@@ -409,7 +420,10 @@ class MFileTransfer:
       self.current_block_index += 1
       logging.info("Transmit %d", (block_sum/file_size)*100)
 
-    logging.info("Transfer file %s success", file_name)
+    logging.info("Transfer file %s success, total slice %d, retransmission %d, rate %.2f"%(
+                 file_name, total_slice_count, 
+                 total_retransmission_count, 
+                 (total_retransmission_count/total_slice_count)*100))
 
   def retransmit(self, slices, block, slice_size):
     for slice_index in slices:
@@ -435,8 +449,12 @@ class MFileTransfer:
 #    with open(path_to_save, 'wb') as saved_file:
     saved_file = 0
     while True:
-      if True == client.wait_server_command():
-        missing_slice = self.get_missing_slice(slice_count) 
+      not_finished, server_block_index = client.wait_server_command()
+      if True == not_finished:
+        if server_block_index < self.current_block_index:
+          missing_slice = []
+        else:
+          missing_slice = self.get_missing_slice(slice_count) 
         if not len(missing_slice):
           self.sync_data(saved_file, slice_count)
         client.retransmission_request(missing_slice)
@@ -456,6 +474,7 @@ class MFileTransfer:
     for slice_index in range(slice_count):
       if slice_index not in self.slice_buffer:
         missing_slices.append(slice_index)
+    logging.error("Ask %d retransmission slice"%len(missing_slices))
     return missing_slices
   
   def sync_data(self, file, slice_count):
@@ -486,7 +505,7 @@ def main(args):
   logging.basicConfig(level=log_level, format=LOG_FORMAT)
 
   if not args.multicast_address or args.multicast_address.find(':') == -1:
-    multicast_ip = "225.100.100.6"
+    multicast_ip = "239.100.100.6"
     multicast_port  = "5555"
     logging.info("Using default muticast address %s:%s", multicast_ip, multicast_port)
   else:
@@ -558,7 +577,7 @@ if __name__ == "__main__":
   if not args.client and not args.server:
       logging.warning("Run in qpython as client mode")
       args.client=True
-      args.address="192.168.1.101:6001"
+      args.address="192.168.188.176:6000"
       args.debug=True
   main(args)
 
